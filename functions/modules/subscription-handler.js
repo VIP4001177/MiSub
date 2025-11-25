@@ -14,6 +14,17 @@ const KV_KEY_PROFILES = 'misub_profiles_v1';
 const KV_KEY_SETTINGS = 'worker_settings_v1';
 
 /**
+ * -------------------------------
+ * ✅ 你的自定义 3 个过期 SS 节点（不会被过滤）
+ * -------------------------------
+ */
+const EXPIRED_NODES = [
+    "ss://YWVzLTI1Ni1nY206MDAwMDAwMDAwMDAwMDAwMA==@127.0.0.1:443#🇨🇳 订阅会员已到期",
+    "ss://YWVzLTI1Ni1nY206MDAwMDAwMDAwMDAwMDAwMA==@127.0.0.1:443#🇨🇳 请联系客服续费",
+    "ss://YWVzLTI1Ni1nY206MDAwMDAwMDAwMDAwMDAwMA==@127.0.0.1:443#🇨🇳 微信 EX3116"
+];
+
+/**
  * 处理MiSub订阅请求
  * @param {Object} context - Cloudflare上下文
  * @returns {Promise<Response>} HTTP响应
@@ -32,7 +43,7 @@ export async function handleMisubRequest(context) {
     const settings = settingsData || {};
     const allMisubs = misubsData || [];
     const allProfiles = profilesData || [];
-    // 关键：我们在这里定义了 `config`，后续都应该使用它
+
     const config = migrateConfigSettings({ ...defaultSettings, ...settings });
 
     let token = '';
@@ -52,61 +63,72 @@ export async function handleMisubRequest(context) {
     let subName = config.FileName;
     let effectiveSubConverter;
     let effectiveSubConfig;
-    let isProfileExpired = false; // Moved declaration here
-
-    const DEFAULT_EXPIRED_NODE = `# placeholder            <- 注释行（被解析器跳过）
-ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%9F%87%B3%20%E8%AE%A2%E9%98%85%E4%BC%9A%E5%91%98%E5%B7%B2%E5%88%B0%E6%9C%9F
-ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%9F%87%B3%20%E8%AE%A2%E9%98%85%E4%BC%9A%E5%91%98%E5%B7%B2%E5%88%B0%E6%9C%9F
-ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%9F%87%B3%20%E8%AF%B7%E8%81%94%E7%B3%BB%E5%AE%A2%E6%9C%8D%E7%BB%AD%E8%B4%B9
-ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%9F%87%B3%20%E5%BE%AE%E4%BF%A1%20EX3116`;
+    let isProfileExpired = false;
 
     if (profileIdentifier) {
-        // [修正] 使用 config 變量
+
         if (!token || token !== config.profileToken) {
             return new Response('Invalid Profile Token', { status: 403 });
         }
+
         const profile = allProfiles.find(p => (p.customId && p.customId === profileIdentifier) || p.id === profileIdentifier);
-        if (profile && profile.enabled) {
-            // Check if the profile has an expiration date and if it's expired
-            if (profile.expiresAt) {
-                const expiryDate = new Date(profile.expiresAt);
-                const now = new Date();
-                if (now > expiryDate) {
-                    isProfileExpired = true;
-                }
-            }
 
-            if (isProfileExpired) {
-                subName = profile.name; // Still use profile name for filename
-                targetMisubs = [{ id: 'expired-node', url: DEFAULT_EXPIRED_NODE, name: '您的订阅已到期', isExpiredNode: true }]; // Set expired node as the only targetMisub
-            } else {
-                subName = profile.name;
-                const profileSubIds = new Set(profile.subscriptions);
-                const profileNodeIds = new Set(profile.manualNodes);
-                targetMisubs = allMisubs.filter(item => {
-                    const isSubscription = item.url.startsWith('http');
-                    const isManualNode = !isSubscription;
-
-                    // Check if the item belongs to the current profile and is enabled
-                    const belongsToProfile = (isSubscription && profileSubIds.has(item.id)) || (isManualNode && profileNodeIds.has(item.id));
-                    if (!item.enabled || !belongsToProfile) {
-                        return false;
-                    }
-                    return true;
-                });
-            }
-            effectiveSubConverter = profile.subConverter && profile.subConverter.trim() !== '' ? profile.subConverter : config.subConverter;
-            effectiveSubConfig = profile.subConfig && profile.subConfig.trim() !== '' ? profile.subConfig : config.subConfig;
-        } else {
+        if (!profile || !profile.enabled) {
             return new Response('Profile not found or disabled', { status: 404 });
         }
+
+        if (profile.expiresAt) {
+            const expiryDate = new Date(profile.expiresAt);
+            const now = new Date();
+            if (now > expiryDate) {
+                isProfileExpired = true;
+            }
+        }
+
+        if (isProfileExpired) {
+            subName = profile.name;
+
+            /**
+             * -----------------------------------
+             * ✅ 过期 → 返回 3 个自定义 SS 节点
+             * -----------------------------------
+             */
+            targetMisubs = EXPIRED_NODES.map((node, index) => ({
+                id: `expired-node-${index}`,
+                url: node,
+                name: "订阅已到期",
+                isExpiredNode: true
+            }));
+
+        } else {
+            subName = profile.name;
+            const profileSubIds = new Set(profile.subscriptions);
+            const profileNodeIds = new Set(profile.manualNodes);
+
+            targetMisubs = allMisubs.filter(item => {
+                const isSubscription = item.url.startsWith('http');
+                const isManualNode = !isSubscription;
+
+                const belongsToProfile =
+                    (isSubscription && profileSubIds.has(item.id)) ||
+                    (isManualNode && profileNodeIds.has(item.id));
+
+                return item.enabled && belongsToProfile;
+            });
+        }
+
+        effectiveSubConverter =
+            profile.subConverter?.trim() !== '' ? profile.subConverter : config.subConverter;
+        effectiveSubConfig =
+            profile.subConfig?.trim() !== '' ? profile.subConfig : config.subConfig;
+
     } else {
-        // [修正] 使用 config 變量
+
         if (!token || token !== config.mytoken) {
             return new Response('Invalid Token', { status: 403 });
         }
+
         targetMisubs = allMisubs.filter(s => s.enabled);
-        // [修正] 使用 config 變量
         effectiveSubConverter = config.subConverter;
         effectiveSubConfig = config.subConfig;
     }
@@ -115,28 +137,28 @@ ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%
         return new Response('Subconverter backend is not configured.', { status: 500 });
     }
 
+    /**
+     * -------- 处理 target format --------
+     */
     let targetFormat = url.searchParams.get('target');
     if (!targetFormat) {
         const supportedFormats = ['clash', 'singbox', 'surge', 'loon', 'base64', 'v2ray', 'trojan'];
         for (const format of supportedFormats) {
             if (url.searchParams.has(format)) {
-                if (format === 'v2ray' || format === 'trojan') { targetFormat = 'base64'; } else { targetFormat = format; }
+                targetFormat = (format === 'v2ray' || format === 'trojan') ? 'base64' : format;
                 break;
             }
         }
     }
+
     if (!targetFormat) {
         const ua = userAgentHeader.toLowerCase();
-        // 使用陣列來保證比對的優先順序
         const uaMapping = [
-            // Mihomo/Meta 核心的客戶端 - 需要clash格式
             ['flyclash', 'clash'],
             ['mihomo', 'clash'],
             ['clash.meta', 'clash'],
             ['clash-verge', 'clash'],
             ['meta', 'clash'],
-
-            // 其他客戶端
             ['stash', 'clash'],
             ['nekoray', 'clash'],
             ['sing-box', 'singbox'],
@@ -147,20 +169,20 @@ ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%
             ['loon', 'loon'],
             ['quantumult%20x', 'quanx'],
             ['quantumult', 'quanx'],
-
-            // 最後才匹配通用的 clash，作為向下相容
             ['clash', 'clash']
         ];
 
         for (const [keyword, format] of uaMapping) {
             if (ua.includes(keyword)) {
                 targetFormat = format;
-                break; // 找到第一個符合的就停止
+                break;
             }
         }
     }
-    if (!targetFormat) { targetFormat = 'base64'; }
 
+    if (!targetFormat) targetFormat = 'base64';
+
+    // TG 通知处理
     if (!url.searchParams.has('callback_token')) {
         const clientIp = request.headers.get('CF-Connecting-IP') || 'N/A';
         const country = request.headers.get('CF-IPCountry') || 'N/A';
@@ -177,16 +199,22 @@ ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%
             }
         }
 
-        // 使用增强版TG通知，包含IP地理位置信息
         context.waitUntil(sendEnhancedTgNotification(config, '🛰️ *订阅被访问*', clientIp, additionalData));
     }
 
     let prependedContentForSubconverter = '';
 
-    if (isProfileExpired) { // Use the flag set earlier
-        prependedContentForSubconverter = ''; // Expired node is now in targetMisubs
+    if (isProfileExpired) {
+
+        /**
+         * -------------------------
+         * 🟥 注意：过期不加入流量节点
+         * -------------------------
+         */
+        prependedContentForSubconverter = '';
+
     } else {
-        // Otherwise, add traffic remaining info if applicable
+
         const totalRemainingBytes = targetMisubs.reduce((acc, sub) => {
             if (sub.enabled && sub.userInfo && sub.userInfo.total > 0) {
                 const used = (sub.userInfo.upload || 0) + (sub.userInfo.download || 0);
@@ -195,10 +223,12 @@ ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%
             }
             return acc;
         }, 0);
+
         if (totalRemainingBytes > 0) {
             const formattedTraffic = formatBytes(totalRemainingBytes);
             const fakeNodeName = `流量剩余 ≫ ${formattedTraffic}`;
-            prependedContentForSubconverter = `trojan://00000000-0000-0000-0000-000000000000@127.0.0.1:443#${encodeURIComponent(fakeNodeName)}`;
+            prependedContentForSubconverter =
+                `trojan://00000000-0000-0000-0000-000000000000@127.0.0.1:443#${encodeURIComponent(fakeNodeName)}`;
         }
     }
 
@@ -211,53 +241,102 @@ ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNToxMjM0NTY3OA==@127.0.0.1:443#%F0%9F%87%A8%F0%
         profileIdentifier ? allProfiles.find(p => (p.customId && p.customId === profileIdentifier) || p.id === profileIdentifier)?.prefixSettings : null
     );
 
+    /**
+     * -------------------------
+     * base64 输出
+     * -------------------------
+     */
     if (targetFormat === 'base64') {
         let contentToEncode;
+
         if (isProfileExpired) {
-            contentToEncode = DEFAULT_EXPIRED_NODE + '\n'; // Return the expired node link for base64 clients
+            /**
+             * ------------------------------
+             * 完整输出 3 个过期 SS 节点
+             * ------------------------------
+             */
+            contentToEncode = EXPIRED_NODES.join("\n") + "\n";
         } else {
             contentToEncode = combinedNodeList;
         }
-        const headers = { "Content-Type": "text/plain; charset=utf-8", 'Cache-Control': 'no-store, no-cache' };
-        return new Response(btoa(unescape(encodeURIComponent(contentToEncode))), { headers });
+
+        const headers = {
+            "Content-Type": "text/plain; charset=utf-8",
+            'Cache-Control': 'no-store, no-cache'
+        };
+        return new Response(
+            btoa(unescape(encodeURIComponent(contentToEncode))),
+            { headers }
+        );
     }
+
+    /**
+     * -------------------------
+     * 非 base64 → Subconverter
+     * -------------------------
+     */
 
     const base64Content = btoa(unescape(encodeURIComponent(combinedNodeList)));
 
     const callbackToken = await getCallbackToken(env);
-    const callbackPath = profileIdentifier ? `/${token}/${profileIdentifier}` : `/${token}`;
+    const callbackPath = profileIdentifier
+        ? `/${token}/${profileIdentifier}`
+        : `/${token}`;
     const callbackUrl = `${url.protocol}//${url.host}${callbackPath}?target=base64&callback_token=${callbackToken}`;
+
     if (url.searchParams.get('callback_token') === callbackToken) {
-        const headers = { "Content-Type": "text/plain; charset=utf-8", 'Cache-Control': 'no-store, no-cache' };
-        return new Response(base64Content, { headers });
+        return new Response(base64Content, {
+            headers: {
+                "Content-Type": "text/plain; charset=utf-8",
+                'Cache-Control': 'no-store, no-cache'
+            }
+        });
     }
 
     const subconverterUrl = new URL(`https://${effectiveSubConverter}/sub`);
     subconverterUrl.searchParams.set('target', targetFormat);
     subconverterUrl.searchParams.set('url', callbackUrl);
-    if ((targetFormat === 'clash' || targetFormat === 'loon' || targetFormat === 'surge') && effectiveSubConfig && effectiveSubConfig.trim() !== '') {
+
+    if (
+        (targetFormat === 'clash' || targetFormat === 'loon' || targetFormat === 'surge')
+        && effectiveSubConfig?.trim() !== ''
+    ) {
         subconverterUrl.searchParams.set('config', effectiveSubConfig);
     }
+
     subconverterUrl.searchParams.set('new_name', 'true');
 
     try {
         const subconverterResponse = await fetch(subconverterUrl.toString(), {
             method: 'GET',
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+            headers: { 'User-Agent': 'Mozilla/5.0' }
         });
+
         if (!subconverterResponse.ok) {
             const errorBody = await subconverterResponse.text();
             throw new Error(`Subconverter service returned status: ${subconverterResponse.status}. Body: ${errorBody}`);
         }
+
         const responseText = await subconverterResponse.text();
 
         const responseHeaders = new Headers(subconverterResponse.headers);
-        responseHeaders.set("Content-Disposition", `attachment; filename*=utf-8''${encodeURIComponent(subName)}`);
+        responseHeaders.set(
+            "Content-Disposition",
+            `attachment; filename*=utf-8''${encodeURIComponent(subName)}`
+        );
         responseHeaders.set('Content-Type', 'text/plain; charset=utf-8');
         responseHeaders.set('Cache-Control', 'no-store, no-cache');
-        return new Response(responseText, { status: subconverterResponse.status, statusText: subconverterResponse.statusText, headers: responseHeaders });
+
+        return new Response(responseText, {
+            status: subconverterResponse.status,
+            statusText: subconverterResponse.statusText,
+            headers: responseHeaders
+        });
+
     } catch (error) {
         console.error(`[MiSub Final Error] ${error.message}`);
-        return new Response(`Error connecting to subconverter: ${error.message}`, { status: 502 });
+        return new Response(`Error connecting to subconverter: ${error.message}`, {
+            status: 502
+        });
     }
 }
